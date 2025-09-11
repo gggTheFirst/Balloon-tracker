@@ -1,11 +1,4 @@
-/* Blink Example
 
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,7 +9,7 @@
 #include "driver/ledc.h" // for pwm stuff
 
 
-static const char *TAG = "example";
+static const char *TAG = "Servo_control";
 
 /* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
    or you can edit the following line and set a number here.
@@ -24,7 +17,7 @@ static const char *TAG = "example";
 #define BLINK_GPIO 2
 
 #define PWM_PIN        26  // GPIO pin for PWM output
-#define PWM_FREQUENCY  1000 // 5 kHz PWM frequency
+#define PWM_FREQUENCY  500 // 600 Hz PWM frequency
 #define PWM_RESOLUTION LEDC_TIMER_8_BIT // Resolution: 8 bits (0-255 duty)
 
 
@@ -81,16 +74,17 @@ static void configure_servo(void)
 void move_servo_task(void *pvParameter){
     //code to move servo
     configure_servo();
-
+    int duty = 0;
     while (1) {
         ESP_LOGI("MOTOR", "Hello from move_servo_task!");
         // Add code to move the servo here
         ESP_LOGI(TAG, "Moving the servo to position!");
         // Example: Change duty cycle to move servo
-        for (int duty = 0; duty <= 255; duty += 51) { // Move from 0% to 100% in steps
+        for ( duty = 0; duty <= 255; duty += 1) { // Move from 0% to 100% in steps
             ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, duty);
             ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-            vTaskDelay(500 / portTICK_PERIOD_MS);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            ESP_LOGI(TAG, "Moving the servo to position %d!", duty);
         }
     }
 
@@ -113,6 +107,6 @@ void app_main(void)
 
     /* Configure the peripheral according to the LED type */
     configure_led();
-    xTaskCreate(led_task, "LedTask", 2048, NULL, 1, NULL);
+    //xTaskCreate(led_task, "LedTask", 2048, NULL, 1, NULL);
     xTaskCreate(move_servo_task, "MoveServoTask", 2048, NULL, 1, NULL);
 }
