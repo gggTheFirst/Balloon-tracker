@@ -1,30 +1,7 @@
 
-#include <stdio.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "led_strip.h"
-#include "sdkconfig.h"
-#include "driver/ledc.h" // for pwm stuff
-
+#include "motors.h"
 
 static const char *TAG = "Servo_control";
-
-/* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
-   or you can edit the following line and set a number here.
-*/
-
-// Servo configuration
-#define SERVO1_PIN     13  // GPIO pin for servo 1
-#define SERVO2_PIN     14  // GPIO pin for servo 2
-#define PWM_FREQUENCY  50  // 50 Hz for servo control (standard servo frequency)
-#define PWM_RESOLUTION LEDC_TIMER_16_BIT // 16-bit resolution for better servo control
-
-// Servo pulse width constants (in microseconds)
-#define SERVO_MIN_PULSE_WIDTH 500   // 0.5ms (0 degrees)
-#define SERVO_MAX_PULSE_WIDTH 2100  // 2.1ms (180 degrees)
-#define SERVO_CENTER_PULSE_WIDTH 1500 // 1.5ms (90 degrees)
 
 // Calculate duty cycle for servo position (0-180 degrees)
 uint32_t servo_angle_to_duty(uint8_t angle) {
@@ -39,11 +16,8 @@ uint32_t servo_angle_to_duty(uint8_t angle) {
 }
 
 
-static uint8_t s_led_state = 0;
 
-
-
-static void configure_servos(void)
+int configure_servos(void)
 {
     ESP_LOGI(TAG, "Configuring dual servo control!");
     
@@ -55,7 +29,11 @@ static void configure_servos(void)
         .freq_hz          = PWM_FREQUENCY,        // 50 Hz
         .clk_cfg          = LEDC_AUTO_CLK
     };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    if (ledc_timer_config(&ledc_timer) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure LEDC timer");
+        return -1;
+    }
 
     // Configure channel for Servo 1 (GPIO 13)
     ledc_channel_config_t servo1_channel = {
@@ -67,7 +45,10 @@ static void configure_servos(void)
         .duty           = servo_angle_to_duty(90), // Start at center position (90 degrees)
         .hpoint         = 0
     };
-    ESP_ERROR_CHECK(ledc_channel_config(&servo1_channel));
+    if (ledc_channel_config(&servo1_channel) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure Servo 1 channel");
+        return -1;
+    }
 
     // Configure channel for Servo 2 (GPIO 14)
     ledc_channel_config_t servo2_channel = {
@@ -79,7 +60,11 @@ static void configure_servos(void)
         .duty           = servo_angle_to_duty(90), // Start at center position (90 degrees)
         .hpoint         = 0
     };
-    ESP_ERROR_CHECK(ledc_channel_config(&servo2_channel));
+
+    if (ledc_channel_config(&servo2_channel) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure Servo 2 channel");
+        return -1;
+    }
 
     ESP_LOGI(TAG, "Servo 1 configured on GPIO %d", SERVO1_PIN);
     ESP_LOGI(TAG, "Servo 2 configured on GPIO %d", SERVO2_PIN);
@@ -112,22 +97,22 @@ void set_servo_angle(uint8_t servo_num, uint8_t angle) {
 }
 
 // Simple servo control functions
-void servo1_open(void) {
+void balloon_release(void) {
     set_servo_angle(1, 0);  // Open position (0 degrees)
     ESP_LOGI(TAG, "Servo 1 OPENED");
 }
 
-void servo1_close(void) {
+void balloon_lock(void) {
     set_servo_angle(1, 180);  // Close position (180 degrees)
     ESP_LOGI(TAG, "Servo 1 CLOSED");
 }
 
-void servo2_open(void) {
+void parachute_deploy(void) {
     set_servo_angle(2, 0);  // Open position (0 degrees)
     ESP_LOGI(TAG, "Servo 2 OPENED");
 }
 
-void servo2_close(void) {
+void parachute_lock(void) {
     set_servo_angle(2, 180);  // Close position (180 degrees)
     ESP_LOGI(TAG, "Servo 2 CLOSED");
 }
@@ -143,29 +128,31 @@ void move_servo_task(void *pvParameter){
     
     while (1) {
         // Test Servo 1
-        ESP_LOGI(TAG, "Testing Servo 1...");
-        servo1_open();
+        ESP_LOGI(TAG, "Payload detached from balloon.");
+        balloon_release();
         vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
         
-        servo1_close();
+        ESP_LOGI(TAG, "Payload secured to balloon.");
+        parachute_lock();
         vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
         
         // Test Servo 2
-        ESP_LOGI(TAG, "Testing Servo 2...");
-        servo2_open();
+        ESP_LOGI(TAG, "Parachute deployed");
+        parachute_deploy();
         vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
         
-        servo2_close();
+        ESP_LOGI(TAG, "Parachute locked to payload");
+        parachute_lock();
         vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
         
         // Test both together
         ESP_LOGI(TAG, "Testing both servos together...");
-        servo1_open();
-        servo2_open();
+        balloon_release();
+        parachute_deploy();
         vTaskDelay(3000 / portTICK_PERIOD_MS);  // Wait 3 seconds
         
-        servo1_close();
-        servo2_close();
+        parachute_lock();
+        parachute_lock();
         vTaskDelay(3000 / portTICK_PERIOD_MS);  // Wait 3 seconds
         
         ESP_LOGI(TAG, "Demo cycle complete. Repeating in 2 seconds...");
@@ -174,11 +161,10 @@ void move_servo_task(void *pvParameter){
 }
 
 
-
-void app_main(void)
-{
+//void app_main(void)
+//{
 
     /* Configure the peripheral according to the LED type */
     //xTaskCreate(led_task, "LedTask", 2048, NULL, 1, NULL);
-    xTaskCreate(move_servo_task, "MoveServoTask", 2048, NULL, 1, NULL);
-}
+   // xTaskCreate(move_servo_task, "MoveServoTask", 2048, NULL, 1, NULL);
+//}

@@ -1,17 +1,4 @@
-#include <stdio.h>
-#include <string.h>
-#include "driver/uart.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "nvs_flash.h"      // Include NVS flash header
-#include "nvs.h"            // Include NVS header
-
-#define UART_NUM            UART_NUM_2         // Use UART2
-#define UART_TX_PIN         (17)               // ESP32 TX pin connected to GPS RX
-#define UART_RX_PIN         (16)               // ESP32 RX pin connected to GPS TX
-#define UART_BAUD_RATE      (9600)             // Default baud rate for MAX-M10S
-#define UART_BUF_SIZE       (1024)             // Buffer size for incoming data
-
+#include "GPS.h"
 
 static const char *TAG = "GPS_TEST";
 
@@ -117,7 +104,13 @@ void process_uart_buffer(char* buffer, nvs_handle_t nvs_handle) {
     }
 }
 
-int get_gps_lat_lon(char *lat_buf, size_t lat_buf_size, char *lon_buf, size_t lon_buf_size) {
+int get_gps_lat_lon(float *latitude, float *longitude) {
+    // Validate input parameters
+    if (!latitude || !longitude) {
+        ESP_LOGE(TAG, "Invalid parameters: latitude and longitude pointers cannot be NULL");
+        return -1;
+    }
+    
     esp_err_t ret;
     nvs_handle_t nvs_handle;
     ret = nvs_open("nmea_store", NVS_READONLY, &nvs_handle);
@@ -125,22 +118,120 @@ int get_gps_lat_lon(char *lat_buf, size_t lat_buf_size, char *lon_buf, size_t lo
         ESP_LOGE(TAG, "Error opening NVS handle for reading!");
         return -1;
     }
-    // Read latitude
+    
+    // Read latitude string from NVS
+    char lat_buf[MAX_FULL_COORD_LEN + 1];
+    size_t lat_buf_size = sizeof(lat_buf);
     ret = nvs_get_str(nvs_handle, "LAT", lat_buf, &lat_buf_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read LAT from NVS");
         nvs_close(nvs_handle);
         return -1;
     }
-    // Read longitude
+    
+    // Read longitude string from NVS
+    char lon_buf[MAX_FULL_COORD_LEN + 1];
+    size_t lon_buf_size = sizeof(lon_buf);
     ret = nvs_get_str(nvs_handle, "LON", lon_buf, &lon_buf_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read LON from NVS");
         nvs_close(nvs_handle);
         return -1;
     }
+    
     nvs_close(nvs_handle);
+    
+    // Parse latitude string (format: "DDMM.MMMMM,N/S")
+    char *lat_comma = strchr(lat_buf, ',');
+    if (!lat_comma || lat_comma == lat_buf) {
+        ESP_LOGE(TAG, "Invalid latitude format: %s", lat_buf);
+        return -1;
+    }
+    
+    *lat_comma = '\0'; // Split the string
+    char lat_direction = lat_comma[1];
+    *latitude = nmea_to_decimal(lat_buf, lat_direction);
+    
+    // Parse longitude string (format: "DDDMM.MMMMM,E/W")
+    char *lon_comma = strchr(lon_buf, ',');
+    if (!lon_comma || lon_comma == lon_buf) {
+        ESP_LOGE(TAG, "Invalid longitude format: %s", lon_buf);
+        return -1;
+    }
+    
+    *lon_comma = '\0'; // Split the string
+    char lon_direction = lon_comma[1];
+    *longitude = nmea_to_decimal(lon_buf, lon_direction);
+    
+    ESP_LOGI(TAG, "GPS coordinates retrieved: LAT=%.6f, LON=%.6f", *latitude, *longitude);
     return 0; // Success
+}
+
+double nmea_to_decimal(const char* nmea_coord, char direction) {
+    if (!nmea_coord || strlen(nmea_coord) == 0) {
+        ESP_LOGE(TAG, "Invalid NMEA coordinate");
+        return 0.0;
+    }
+    
+    // Parse NMEA coordinate format: DDMM.MMMMM or DDDMM.MMMMM
+    double coord = atof(nmea_coord);
+    
+    // Extract degrees and minutes
+    int degrees;
+    double minutes;
+    
+    if (strlen(nmea_coord) > 7) { // Longitude format DDDMM.MMMMM
+        degrees = (int)(coord / 100);
+        minutes = coord - (degrees * 100);
+    } else { // Latitude format DDMM.MMMMM
+        degrees = (int)(coord / 100);
+        minutes = coord - (degrees * 100);
+    }
+    
+    // Convert to decimal degrees
+    double decimal = degrees + (minutes / 60.0);
+    
+    // Apply direction (negative for South and West)
+    if (direction == 'S' || direction == 'W') {
+        decimal = -decimal;
+    }
+    
+    return decimal;
+}
+
+int gps_uart_init(void){
+    uart_config_t uart_config = {
+        .baud_rate = UART_BAUD_RATE,
+        .data_bits = UART_DATA_8_BITS,         // 8 data bits
+        .parity    = UART_PARITY_DISABLE,      // No parity
+        .stop_bits = UART_STOP_BITS_1,         // 1 stop bit
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, // No hardware flow control
+        .source_clk = UART_SCLK_APB,
+    };
+
+    // Configure UART parameters
+    esp_err_t err = uart_param_config(UART_NUM, &uart_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure UART parameters");
+        return -1;
+    }
+
+    // Set UART pins (TX, RX, RTS, CTS)
+    err = uart_set_pin(UART_NUM, UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set UART pins");
+        return -1;
+    }
+
+    // Install UART driver with RX buffer
+    err = uart_driver_install(UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to install UART driver");
+        return -1;
+    }
+    ESP_LOGI(TAG, "GPS UART initialized on UART2");
+    return 0;
+
 }
 
 void app_main(void)
@@ -160,25 +251,9 @@ void app_main(void)
         return;
     }
 
-     uart_config_t uart_config = {
-        .baud_rate = UART_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,         // 8 data bits
-        .parity    = UART_PARITY_DISABLE,      // No parity
-        .stop_bits = UART_STOP_BITS_1,         // 1 stop bit
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, // No hardware flow control
-        .source_clk = UART_SCLK_APB,
-    };
-
-    // Configure UART parameters
-    uart_param_config(UART_NUM, &uart_config);
-
-    // Set UART pins (TX, RX, RTS, CTS)
-    uart_set_pin(UART_NUM, UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-    // Install UART driver with RX buffer
-    uart_driver_install(UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
-
-     uint8_t data[UART_BUF_SIZE];
+    gps_uart_init();
+    
+    uint8_t data[UART_BUF_SIZE];
 
     ESP_LOGI(TAG, "GPS UART test started. Waiting for NMEA sentences...");
 
@@ -196,13 +271,3 @@ void app_main(void)
 
     nvs_close(nvs_handle);
 }
-
-/*
- * How it works:
- * - NVS is initialized and a handle is opened for a namespace "nmea_store".
- * - Each received NMEA sentence is parsed to extract its type (e.g., "GGA").
- * - The sentence is stored in flash using its type as the key.
- * - If a new sentence of the same type arrives, it overwrites the previous one.
- * - This acts like a dictionary: key = NMEA type, value = latest sentence.
- * - You can later retrieve the latest sentence for any type using nvs_get_str().
- */

@@ -1,21 +1,25 @@
-#include <stdio.h>
-#include "driver/i2c.h"
-#include "esp_log.h"
-
-// --- I2C configuration constants ---
-// I2C_NUM_0: Use I2C hardware port 0 on the ESP32
-#define I2C_MASTER_NUM              I2C_NUM_0
-// SCL (clock) and SDA (data) pin numbers for ESP32
-#define I2C_MASTER_SCL_IO           21
-#define I2C_MASTER_SDA_IO           19
-// I2C clock speed (400kHz is 'fast mode')
-#define I2C_MASTER_FREQ_HZ          400000
-// I2C addresses for the sensors 
-#define MPU9250_ADDR                0x68 // IMU sensor
-#define BMP280_ADDR                 0x76 // Barometer sensor
+#include "imu.h"
 
 // Tag for ESP_LOG output (helps filter logs)
 static const char *TAG = "IMU_TEST";
+
+
+int imu_init() {
+    i2c_master_init();
+    
+    // Initialize the MPU9250
+    if (mpu9250_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize MPU9250");
+        return -1;
+    }
+    
+    // Initialize the BMP280
+    if (bmp280_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize BMP280");
+        return -1;
+    }
+    return 0;
+}
 
 esp_err_t i2c_read_byte(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data) {
     return i2c_master_write_read_device(I2C_MASTER_NUM, dev_addr, &reg_addr, 1, data, 1, 1000 / portTICK_PERIOD_MS);
@@ -110,14 +114,6 @@ esp_err_t mpu9250_init() {
     return ESP_OK;
 }
 
-// Structure to hold all MPU9250 sensor data
-typedef struct {
-    int16_t accel_x, accel_y, accel_z;
-    int16_t temp;
-    int16_t gyro_x, gyro_y, gyro_z;
-    int16_t mag_x, mag_y, mag_z;
-} mpu9250_data_t;
-
 // Read all data from MPU9250
 esp_err_t read_mpu9250_data(mpu9250_data_t *data) {
     uint8_t raw_data[14];
@@ -131,42 +127,20 @@ esp_err_t read_mpu9250_data(mpu9250_data_t *data) {
     }
     
     // Parse accelerometer data (registers 0x3B-0x40)
-    data->accel_x = combine_bytes(raw_data[0], raw_data[1]);
-    data->accel_y = combine_bytes(raw_data[2], raw_data[3]);
-    data->accel_z = combine_bytes(raw_data[4], raw_data[5]);
-    
+    data->accel_x = accel_to_g(combine_bytes(raw_data[0], raw_data[1]));
+    data->accel_y = accel_to_g(combine_bytes(raw_data[2], raw_data[3]));
+    data->accel_z = accel_to_g(combine_bytes(raw_data[4], raw_data[5]));
+
     // Parse temperature data (registers 0x41-0x42)
-    data->temp = combine_bytes(raw_data[6], raw_data[7]);
+    data->temp = temp_to_celsius(combine_bytes(raw_data[6], raw_data[7]));
     
     // Parse gyroscope data (registers 0x43-0x48)
-    data->gyro_x = combine_bytes(raw_data[8], raw_data[9]);
-    data->gyro_y = combine_bytes(raw_data[10], raw_data[11]);
-    data->gyro_z = combine_bytes(raw_data[12], raw_data[13]);
-    
-    // Read magnetometer data (requires accessing the AK8963 chip inside MPU9250)
-    // This is more complex and requires additional setup, so we'll set to 0 for now
-    data->mag_x = 0;
-    data->mag_y = 0;
-    data->mag_z = 0;
-    
+    data->gyro_x = gyro_to_dps(combine_bytes(raw_data[8], raw_data[9]));
+    data->gyro_y = gyro_to_dps(combine_bytes(raw_data[10], raw_data[11]));
+    data->gyro_z = gyro_to_dps(combine_bytes(raw_data[12], raw_data[13]));
+
     return ESP_OK;
 }
-
-// Structure to hold BMP280 calibration data
-typedef struct {
-    uint16_t dig_T1;
-    int16_t dig_T2;
-    int16_t dig_T3;
-    uint16_t dig_P1;
-    int16_t dig_P2;
-    int16_t dig_P3;
-    int16_t dig_P4;
-    int16_t dig_P5;
-    int16_t dig_P6;
-    int16_t dig_P7;
-    int16_t dig_P8;
-    int16_t dig_P9;
-} bmp280_calib_t;
 
 // Global calibration data
 bmp280_calib_t bmp280_calib;
@@ -256,14 +230,6 @@ float bmp280_compensate_pressure(int32_t adc_P) {
     return p / 256.0; // Convert to hPa
 }
 
-// Structure to hold BMP280 data
-typedef struct {
-    uint32_t pressure_raw;
-    uint32_t temperature_raw;
-    float pressure_hpa;
-    float temperature_c;
-} bmp280_data_t;
-
 // Read BMP280 data
 esp_err_t read_bmp280_data(bmp280_data_t *data) {
     uint8_t raw_data[6];
@@ -276,17 +242,17 @@ esp_err_t read_bmp280_data(bmp280_data_t *data) {
         return ret;
     }
     
-    // Parse raw pressure (20-bit value)
-    data->pressure_raw = (raw_data[0] << 12) | (raw_data[1] << 4) | (raw_data[2] >> 4);
-    
-    // Parse raw temperature (20-bit value)
-    data->temperature_raw = (raw_data[3] << 12) | (raw_data[4] << 4) | (raw_data[5] >> 4);
-    
-    // Use proper BMP280 calibration for accurate conversion
-    data->temperature_c = bmp280_compensate_temperature(data->temperature_raw);
-    data->pressure_hpa = bmp280_compensate_pressure(data->pressure_raw);
+    data->pressure_hpa = bmp280_compensate_pressure((raw_data[0] << 12) | (raw_data[1] << 4) | (raw_data[2] >> 4));
+    data->temperature_c = bmp280_compensate_temperature((raw_data[3] << 12) | (raw_data[4] << 4) | (raw_data[5] >> 4));
+    data->altitude_m = calculate_altitude(data->pressure_hpa);
     
     return ESP_OK;
+}
+
+float calculate_altitude(float pressure_hpa) {
+    // Standard atmospheric pressure at sea level: 1013.25 hPa
+    const float SEA_LEVEL_PRESSURE_HPA = 1013.25;
+    return 44330.0 * (1.0 - pow(pressure_hpa / SEA_LEVEL_PRESSURE_HPA, 0.1903));
 }
 
 // Convert raw accelerometer data to g-force
@@ -315,19 +281,7 @@ float temp_to_celsius_alt(int16_t raw_temp) {
 
 void app_main() {
 
-    i2c_master_init();
-    
-    // Initialize the MPU9250
-    if (mpu9250_init() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize MPU9250");
-        return;
-    }
-    
-    // Initialize the BMP280
-    if (bmp280_init() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize BMP280");
-        return;
-    }
+imu_init();
 
     // --- Main loop to read all sensor data ---
     while (1) {
@@ -337,16 +291,13 @@ void app_main() {
         // Read all MPU9250 data
         if (read_mpu9250_data(&mpu_data) == ESP_OK) {
             ESP_LOGI(TAG, "=== MPU9250 Data ===");
-            ESP_LOGI(TAG, "Accelerometer (raw): X=%d, Y=%d, Z=%d", 
+            ESP_LOGI(TAG, "Accelerometer: X=%d, Y=%d, Z=%d", 
                      mpu_data.accel_x, mpu_data.accel_y, mpu_data.accel_z);
-            ESP_LOGI(TAG, "Accelerometer (g): X=%.3f, Y=%.3f, Z=%.3f", 
-                     accel_to_g(mpu_data.accel_x), accel_to_g(mpu_data.accel_y), accel_to_g(mpu_data.accel_z));
-            ESP_LOGI(TAG, "Gyroscope (raw): X=%d, Y=%d, Z=%d", 
+
+            ESP_LOGI(TAG, "Gyroscope(°/s): X=%d, Y=%d, Z=%d", 
                      mpu_data.gyro_x, mpu_data.gyro_y, mpu_data.gyro_z);
             ESP_LOGI(TAG, "Gyroscope (°/s): X=%.3f, Y=%.3f, Z=%.3f", 
                      gyro_to_dps(mpu_data.gyro_x), gyro_to_dps(mpu_data.gyro_y), gyro_to_dps(mpu_data.gyro_z));
-            ESP_LOGI(TAG, "MPU9250 Temp: %.2f°C (raw: %d) [WARNING: May be inaccurate!]", 
-                     temp_to_celsius(mpu_data.temp), mpu_data.temp);
             ESP_LOGI(TAG, "MPU9250 Temp Alt: %.2f°C [Alternative calculation]", 
                      temp_to_celsius_alt(mpu_data.temp));
         }
@@ -354,10 +305,8 @@ void app_main() {
         // Read all BMP280 data
         if (read_bmp280_data(&bmp_data) == ESP_OK) {
             ESP_LOGI(TAG, "=== BMP280 Data ===");
-            ESP_LOGI(TAG, "Pressure (raw): %lu", bmp_data.pressure_raw);
             ESP_LOGI(TAG, "Pressure: %.2f hPa", bmp_data.pressure_hpa);
-            ESP_LOGI(TAG, "Temperature (raw): %lu", bmp_data.temperature_raw);
-            ESP_LOGI(TAG, "BMP280 Temp: %.2f°C [ACCURATE - Use this for actual temperature!]", bmp_data.temperature_c);
+            ESP_LOGI(TAG, "Temperature: %.2f°C", bmp_data.temperature_c);
         }
         
         ESP_LOGI(TAG, "========================");
